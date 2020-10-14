@@ -1,0 +1,3 @@
+include README.md LICENSE
+include essay_evaluation/Corpora/*.csv
+include essay_evaluation/Corpora/*.txt

@@ -1,0 +1,25 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+
+[packages]
+spacy = "==2.1.3"
+lexicalrichness = "*"
+nltk = "*"
+pandas = "*"
+matplotlib = "*"
+hunspell = "*"
+numpy = "*"
+beautifulsoup4 = "*"
+lxml = "*"
+textblob = "*"
+neo4j = "*"
+Pyphen = "*"
+jupyter = "*"
+scikit-learn = "*"
+loess = "*"
+neuralcoref = "*"
+lexical-diversity = "*"

@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+import sys
+import warnings
+
+gui = len(sys.argv) > 1
+
+import argparse
+import csv
+import os
+from tkinter import Frame, Tk, filedialog, messagebox, simpledialog
+import tkinter
+from glob import glob
+from bs4 import BeautifulSoup
+import unicodedata
+
+
+class ImportWindow(Frame):
+    _current_row = 0
+    _essay_folder = ''
+    _grade_csv = ''
+    _prompt_file = ''
+    _subject_file = ''
+
+    _cache_dir = '.'
+
+    def __init__(self, master):
+        super().__init__(master)
+        self._entry_subject_csv = self.create_import_field("Subject CSV", self.on_select_subject_csv)
+        self._entry_grade_csv = self.create_import_field("Grade CSV", self.on_select_grade_csv)
+        self._entry_prompt_file = self.create_import_field("Prompt CSV", self.on_select_prompt_csv)
+        self._entry_essay_folder = self.create_import_field("Essay Folder", self.on_select_essay_folder)
+
+        label_session = tkinter.Label(self, text="Session")
+        self._spinbox_session_id = tkinter.Spinbox(self, from_=1, to=100)
+        label_session.grid(row=self._current_row,column=0)
+        self._spinbox_session_id.grid(row=self._current_row, column=1, columnspan=2)
+        self._current_row += 1
+
+        # self._listview_essays = self.create_essay_folder_list()
+
+        importButton = tkinter.Button(self, text="Generate", command=self.on_import_click)
+        importButton.grid(row=self._current_row, column=0, columnspan=3)
+        self._current_row += 1
+
+    def create_import_field(self, labeltext='', command=None):
+        label = tkinter.Label(self, text=labeltext)
+        label.grid(row=self._current_row, column=0)
+        entry = tkinter.Entry(self)
+        entry.grid(row=self._current_row, column=1)
+        btn = tkinter.Button(self, text="Select", command=command)
+        btn.grid(row=self._current_row, column=2)
+        self._current_row += 1
+        return entry
+
+    def on_select_grade_csv(self):
+        self._grade_csv = filedialog.askopenfilename(initialdir=self._cache_dir, title="Select file",
+                                                     filetypes=(("csv file", "*.csv"), ("all files", "*.*")))
+        self._entry_grade_csv.delete(0, tkinter.END)
+        self._entry_grade_csv.insert(0, self._grade_csv)
+
+        self._cache_dir = os.path.dirname(self._grade_csv)
+
+    def on_select_prompt_csv(self):
+        self._prompt_file = filedialog.askopenfilename(initialdir=self._cache_dir, title="Select file",
+                                                       filetypes=(("csv file", "*.csv"), ("all files", "*.*")))
+        self._entry_prompt_file.delete(0, tkinter.END)
+        self._entry_prompt_file.insert(0, self._prompt_file)
+
+        self._cache_dir = os.path.dirname(self._prompt_file)
+
+    def on_select_essay_folder(self):
+        self._essay_folder = filedialog.askdirectory(initialdir=self._cache_dir, title="Select folder")
+        self._entry_essay_folder.delete(0, tkinter.END)
+        self._entry_essay_folder.insert(0, self._essay_folder)
+
+        self._cache_dir = os.path.dirname(self._essay_folder)
+
+    def on_select_subject_csv(self):
+        self._subject_file = filedialog.askopenfilename(initialdir=self._cache_dir, title="Select file",
+                                                        filetypes=(("csv file", "*.csv"), ("all files", "*.*")))
+        self._entry_subject_csv.delete(0, tkinter.END)
+        self._entry_subject_csv.insert(0, self._subject_file)
+
+        self._cache_dir = os.path.dirname(self._subject_file)
+
+    def on_import_click(self):
+        outfile = filedialog.asksaveasfilename(initialdir=self._cache_dir, title="Select file",
+                                                                  filetypes=(
+                                                                  ("csv file", "*.csv"), ("all files", "*.*")))
+        self._cache_dir = os.path.dirname(outfile)
+        session = int(self._spinbox_session_id.get())
+        generate_dataframe(self._subject_file, self._grade_csv, self._prompt_file, self._essay_folder, session, outfile)
+
+
+def main_tk():
+    root = Tk()
+    app = ImportWindow(root)
+    app.pack()
+    root.mainloop()
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        prog="""This tool generates a dataframe csv from several FLIP English input files"""
+    )
+    parser.add_argument(
+        "subjectfile",
+        help="""File path to a csv containing the student's information. Followi\
+                ng columns have to be present: Nachname, Vorname, Level
+    """
+    )
+    parser.add_argument(
+        "gradefile",
+        help="""File path to a csv containing the grades. Following columns have\
+                 to be present: First name,Surname,Content,Organization,Vocabulary,\
+                Grammar,Mechanics"""
+    )
+    parser.add_argument(
+        "promptfile",
+        help="""File path to a csv containing the prmopts. Following columns hav\
+                e to be present: Level,Session,Prompt Title,Prompt Description"""
+    )
+    parser.add_argument(
+        "essaydir",
+        help="""Path to the folder containing the essays. The filename of each e\
+                ssay should follow this schema: FirstName LastName_SubmissionID_ass\
+                ignsubmission_onlinetext_onlinetext.html"""
+    )
+    parser.add_argument(
+        "sessionid",
+        type=int,
+        help="""session id. needed for prompt matching
+    """
+    )
+    parser.add_argument(
+        "outfile",
+        help="File to write data tow"
+    )
+
+    return parser.parse_args()
+
+
+def read_csv(filepath):
+    with open(filepath) as fh:
+        reader = csv.DictReader(fh)
+        return list(reader)
+
+
+def read_essays(dir):
+    result = dict()
+    for filename in glob(dir + '/*'):
+        base = os.path.basename(filename)
+        splitted = base.split('_')
+        with open(filename) as fh:
+            try:
+                text = BeautifulSoup(fh.read(), "lxml")\
+                                        .get_text(separator=" ")
+                result[splitted[0]] = " ".join(text.split()) # remove double spaces, line breaks etc.
+            except Exception as e:
+                print("Error while reading ", filename, ". ", str(e))
+                print(str(e.__traceback__))
+                result[splitted[0]] = " "
+
+    return result
+
+
+def generate_dataframe(subjectfile, gradefile, promptfile, essaydir, session_id, outfile):
+    students = read_csv(subjectfile)
+    grades = read_csv(gradefile)
+    prompts = read_csv(promptfile)
+    essays = read_essays(essaydir)
+
+    result = []
+    for i, (name, essay) in enumerate(essays.items(), 1):
+        name = unicodedata.normalize('NFC', name)  # some unicode characters take two bytes here
+
+        student = list(filter(
+            lambda x: (x['Vorname'].split()[0] + ' ' + x['Nachname']).lower().encode("utf-8") == name.lower().encode(
+                "utf-8"), students))
+        if len(student) != 1:
+            warnings.warn(str(len(student)) + ' student(s) have been found for the essay of ' + name + '.')
+            continue
+        grade = list(filter(lambda x: (x['First name'] + ' ' + x['Surname']).lower() == name.lower(), grades))
+        if len(grade) != 1:
+            warnings.warn(str(len(grade)) + ' grade entries have been found for the essay of ' + name + '.')
+            grade = [{
+                'Content': 'N/A',
+                'Organization': 'N/A',
+                'Vocabulary': 'N/A',
+                'Grammar': 'N/A',
+                'Mechanics': 'N/A',
+                'Grade': 'N/A',
+            }]
+        level = student[0]['Level']
+        prompt = list(filter(lambda x: x['Level'] == level and x['Session'] == "Session " + str(session_id), prompts))
+        if len(prompt) != 1:
+            warnings.warn(str(len(prompt)) + ' prompt entries have been found for the essay of ' + name + '.')
+        student, grade, prompt = student[0], grade[0], prompt[0]
+
+        result.append({
+            'Session': session_id,
+            'Prompt': prompt['Prompt Title'],
+            'Prompt_Desc': prompt['Prompt Description'],
+            'Student': name,
+            'Level': level,
+            'Essay': essay.strip(),
+            'Grade_Content': grade['Content'],
+            'Grade_Organization': grade['Organization'],
+            'Grade_Vocabulary': grade['Vocabulary'],
+            'Grade_Grammar': grade['Grammar'],
+            'Grade_Mechanics': grade['Mechanics'],
+            'Grade_Overall': grade['Grade']
+        })
+
+    with open(outfile, 'w') as fh:
+        writer = csv.DictWriter(fh, fieldnames=result[0].keys())
+        writer.writeheader()
+        writer.writerows(result)
+
+
+def main_cli():
+    args = get_args()
+    generate_dataframe(args.subjectfile, args.gradefile, args.promptfile, args.essaydir, args.sessionid, args.outfile)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        # cli mode
+        main_cli()
+    else:
+        # gui mode
+        main_tk()

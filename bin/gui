@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+import csv
+from tkinter import Tk, Frame, Menu, filedialog, messagebox
+from tkinter.ttk import Treeview
+import tkinter
+
+import numpy as np
+import spacy
+from bs4 import BeautifulSoup
+from tqdm import tqdm
+
+from DataReader.XMLReader import get_essays, get_flip_texts, get_bawe_texts
+from essay_evaluation.lexical_density import LexicalDensityFeatures
+from essay_evaluation.lexical_sophistication import LexicalSophisticationFeatures
+from essay_evaluation.lexical_variation import LexicalVariationFeatures
+from essay_evaluation.lexical_accuracy import LexicalAccuracy, SpellChecker, CollocationPreprocessor, \
+    CollocationDectector, CollocationEvaluator
+from essay_evaluation.collocational_aspects import CollocationalAspects
+from essay_evaluation.formative_feedback_evaluator import binning_indicies, BinCalculator
+from essay_evaluation.lexical_variation_taaled import LexicalVariationTaaled
+from essay_evaluation.pipeline import FeatureCollector, Pipeline
+
+binning_indicies += [35,36,37,38,39,40,41] # taaled
+
+all_feature_names = LexicalVariationFeatures.feature_names + LexicalSophisticationFeatures.feature_names + \
+                    LexicalAccuracy.feature_names + CollocationalAspects.feature_names + \
+                    LexicalDensityFeatures.feature_names + LexicalVariationTaaled.feature_names
+feature_names = [all_feature_names[index] for index in binning_indicies]
+
+
+def setup_spacy():
+    nlp = Pipeline()\
+        .lexical_variation()\
+        .lexical_sophistication()\
+        .lexical_density()\
+        .lexical_accuracy()\
+        .collocational_aspects()\
+        .lexical_variation_taaled()\
+        .get_pipe()
+    return nlp
+
+nlp = setup_spacy()
+
+
+def create_feature_grid(parent, bin_calc, doc=None):
+    avgs, stds = bin_calc.get_binning_values()
+    tkinter.Label(parent, text="Index").grid(row=0, column=0, padx=10, pady=10)
+    tkinter.Label(parent, text="Bin1").grid(row=0, column=1, padx=10, pady=10)
+    tkinter.Label(parent, text="No Feedback").grid(row=0, column=2, padx=10, pady=10)
+    tkinter.Label(parent, text="Bin4").grid(row=0, column=3, padx=10, pady=10)
+    for row, index in enumerate(binning_indicies):
+        tkinter.Label(parent, text=all_feature_names[index]).grid(row=(row + 1), column=0, padx=10, pady=10)
+        avg = avgs[row]
+        std = stds[row]
+        bg = ['white']*3
+        feature_value = 0
+        if doc is not None:
+            feature_value = doc._.features[index]
+            if feature_value <= avg - std:
+                # bin 1 = feedback
+                if all_feature_names[index] in ["LA_ER", "LA_COL_ERR_R", "CA_BIN1_R"]:
+                    bg[0] = 'green'
+                else:
+                    bg[0] = 'red'
+            elif feature_value >= avg+std:
+                # bin 4 = feedback
+                if all_feature_names[index] in ["LA_ER", "LA_COL_ERR_R", "CA_BIN1_R"]:
+                    bg[2] = 'red'
+                else:
+                    bg[2] = 'green'
+
+            else:
+                bg[1] = 'yellow'
+
+        tkinter.Label(parent, text=all_feature_names[index]).grid(row=(row + 1), column=0, padx=10, pady=10)
+        tkinter.Label(parent, text='<= ' + str(round(avg - std, 4)),bg=bg[0]).grid(row=(row + 1), column=1, padx=10, pady=10)
+        tkinter.Label(parent, text=str(round(avg - std, 4)) + ' to ' + str(round(avg + std, 4)),bg=bg[1]).grid(row=(row + 1),
+                                                                                                    column=2, padx=10,
+                                                                                                    pady=10)
+        tkinter.Label(parent, text='>= ' + str(round(avg + std, 4)),bg=bg[2]).grid(row=(row + 1), column=3, padx=10, pady=10)
+        if doc is not None:
+            tkinter.Label(parent, text='(' + str(round(feature_value, 4)) +')').grid(row=(row + 1), column=4,
+                                                                                        padx=10, pady=10)
+
+
+# nlp = None
+class MainFrame(Frame):
+
+    def __init__(self):
+        super().__init__()
+        self.master.title("Essay Evaluation")
+        self.columns = ['Text'] + feature_names
+        self.create_menubar()
+        self.create_grid()
+        self.treeview_items = []
+        self.essays = []
+        self.feature_matrix = []
+        self.docs = []
+        self.bin_calc = None
+        self.analyze_menu = self.create_analyze_menu()
+
+        self.pack(fill=tkinter.BOTH, expand=1)
+
+    """
+    Setup Components
+    """
+
+    def create_analyze_menu(self):
+        analyze_menu = Menu(tearoff=0)
+        analyze_menu.add_command(label="Analyze", underline=0, command=self.on_analyze_doc)
+        return analyze_menu
+
+
+    def create_menubar(self):
+        menubar = Menu(self.master)
+        self.master.config(menu=menubar)
+
+        fileMenu = Menu(menubar,tearoff=0)
+        fileMenu.add_command(label="Add text", underline=0, command=self.on_add_text)
+        fileMenu.add_command(label="Load EFCAMDAT XML", underline=0, command=self.on_load_xml)
+        fileMenu.add_command(label="Load FLIP CSV", underline=0, command=self.on_load_flip)
+        fileMenu.add_separator()
+        fileMenu.add_command(label="Load Bin Thresholds", underline=0, command=self.on_load_bin_thresholds)
+        fileMenu.add_separator()
+        fileMenu.add_command(label="Save feature matrix", underline=0, command=self.on_save_feature_matrix)
+        fileMenu.add_command(label="Export as CSV", underline=0, command=self.on_export_csv)
+        fileMenu.add_separator()
+        fileMenu.add_command(label="Exit", underline=0, command=self.on_exit)
+
+        runMenu = Menu(menubar,tearoff=0)
+        runMenu.add_command(label="Extract features", underline=0, command=self.on_extract_features)
+        runMenu.add_command(label="Calculate bin thresholds", underline=0, command=self.on_calc_bin_thresholds)
+
+        menubar.add_cascade(label="File", underline=0, menu=fileMenu)
+        menubar.add_cascade(label="Run", underline=0, menu=runMenu)
+
+    def create_grid(self):
+        self.treeview = Treeview(self)
+
+        self.treeview['columns'] = self.columns
+        for column in (['#0'] + self.columns):
+            self.treeview.heading(column, text=column, anchor='w')
+            if column == 'Text':
+                self.treeview.column(column, anchor="w", width=200)
+            else:
+                self.treeview.column(column, anchor="w", width=70)
+
+        self.treeview.pack(fill=tkinter.BOTH, expand=1)
+
+        self.treeview.bind("<Button-3>", self.on_show_grid_popup)
+
+    """
+    Event Listeners
+    """
+    def on_add_text(self):
+        atv = AddTextView(self)
+
+    def on_load_bin_thresholds(self):
+        filename = filedialog.askopenfilename(initialdir=".", title="Select file",
+                                              filetypes=(("feature matrix", "*.npy"), ("all files", "*.*")))
+        self.feature_matrix = np.load(filename)
+        self.on_calc_bin_thresholds()
+
+    def on_exit(self):
+        self.quit()
+
+    def on_load_xml(self):
+        filename = filedialog.askopenfilename(initialdir="~", title="Select file",
+                                              filetypes=(("efcamdat xml files", "*.xml"), ("all files", "*.*")))
+        self.reset()
+        essays, scores = get_essays(filename)
+        for essay in essays:
+            self.add_essay(essay)
+
+    def on_load_flip(self):
+        filename = filedialog.askopenfilename(initialdir="~", title="Select file",
+                                              filetypes=(("FLIP english", "*.csv"), ("all files", "*.*")))
+        self.reset()
+        essays = get_flip_texts(filename)
+        for essay in essays:
+            self.add_essay(essay)
+
+    def on_calc_bin_thresholds(self):
+        self.bin_calc = BinCalculator(binning_indicies, np.array(self.feature_matrix), '')
+        BinThresholdCalculator(self.bin_calc)
+
+    def on_analyze_doc(self):
+        item = self.treeview.selection()[0]
+        index = self.treeview.index(item)
+        if index > len(self.docs):
+            # todo error
+            return
+
+        doc_viewer = DocViewer(self.docs[index], self.bin_calc)
+
+    def on_show_grid_popup(self, event):
+        """action in event of button 3 on tree view"""
+        # select row under mouse
+        iid = self.treeview.identify_row(event.y)
+        if iid:
+            # mouse pointer over item
+            self.treeview.selection_set(iid)
+            self.analyze_menu.post(event.x_root, event.y_root)
+        else:
+            # mouse pointer not over item
+            # occurs when items do not fill frame
+            # no action required
+            pass
+
+    def on_extract_features(self):
+        self.feature_matrix = []
+        self.docs = []
+        for i, essay in enumerate(tqdm(self.essays)):
+            doc = nlp(essay)
+            feature_vector = list(doc._.features.values())
+            self.feature_matrix.append(feature_vector)
+            self.docs.append(doc)
+
+            tree_item = self.treeview_items[i]
+            self.treeview.item(tree_item,
+                               values=([essay.strip()] + [feature_vector[index] for index in binning_indicies]))
+            self.update()
+
+
+    def on_save_feature_matrix(self):
+        if not self.feature_matrix:
+            messagebox.showerror("Error", "You need to extract the feature values first")
+            return
+
+        filename = filedialog.asksaveasfilename(initialdir=".", title="Select file",
+                                              filetypes=(("Numpy", "*.npy"), ("comma separated values", "*.csv")))
+        if filename.endswith('.csv'):
+            with open(filename, 'w') as fh:
+                fh.write(','.join(all_feature_names) + '\n')
+                np.savetxt(fh, np.array(self.feature_matrix), delimiter=",")
+        else:
+            np.save(filename, np.array(self.feature_matrix))
+
+    def on_export_csv(self):
+        filename = filedialog.asksaveasfilename(initialdir=".", title="Select file",
+                                                filetypes=(("comma separated values", "*.csv"),("all files", "*.*")))
+        if filename is None:
+            return
+
+        data = []
+        for i, doc in enumerate(self.docs):
+            row = {
+                'ID': i,
+                'Spelling Mistakes': ', '.join([str(t) for t in doc._.spell_errors]),
+                'Collocations:': ',\n'.join([str(col) for col in doc._.collocations if col.metric is not None]),
+                'Collocation Errors:': ',\n'.join([str(col) for col in doc._.collocations if col.metric is None]),
+                'Lexical Words': ', '.join([str(t) for t in doc if t._.is_lexical]),
+                'Named Entities': ', '.join([str(t) for t in doc if t.ent_type > 0]),
+                'Number of Words': len(doc),
+                'ngsl_words': ', '.join([str(w) for w in doc._.ngsl_words]),
+                'nawl_words': ', '.join([str(w) for w in doc._.nawl_words]),
+                'tsl_words': ', '.join([str(w) for w in doc._.tsl_words]),
+                'fpc_words': ', '.join([str(w) for w in doc._.fpc_words]),
+                'cocaacad_words': ', '.join([str(w) for w in doc._.cocaacad_words]),
+                'cocatech_words': ', '.join([str(w) for w in doc._.cocatech_words]),
+                'cocagenband1_words': ', '.join([str(w) for w in doc._.cocagenband1_words]),
+                'cocagenband2_words': ', '.join([str(w) for w in doc._.cocagenband2_words]),
+                'cocagenband3_words': ', '.join([str(w) for w in doc._.cocagenband3_words])
+            }
+            for f, v in zip(all_feature_names, doc._.features):
+                row[f] = v
+            data.append(row)
+        if len(data) == 0:
+            return
+
+        with open(filename, 'w') as fh:
+            writer = csv.DictWriter(fh, fieldnames=data[0].keys())
+            writer.writeheader()
+            writer.writerows(data)
+
+    """
+    helper functions
+    """
+
+    def add_essay(self, essay):
+        self.essays.append(essay)
+        self.treeview_items.append(
+            self.treeview.insert('', 'end', text=str(len(self.essays)), values=([essay.strip()]))
+        )
+        self.update()
+
+    def reset(self):
+        self.essays = []
+        self.feature_matrix = []
+        self.docs = []
+        self.bin_calc = None
+        self.treeview_items = []
+        self.treeview.delete(*self.treeview.get_children())
+
+
+
+
+
+
+class BinThresholdCalculator(tkinter.Toplevel):
+
+    def __init__(self, bin_calc):
+        super().__init__()
+        self.bin_calc = bin_calc
+        create_feature_grid(self, bin_calc)
+
+
+class DocViewer(tkinter.Toplevel):
+
+    def __init__(self, doc, bin_calc=None):
+        super().__init__()
+        self.notebook = tkinter.ttk.Notebook(self)
+
+        text_tab = tkinter.Frame(self.notebook)
+        self.notebook.add(text_tab, text="Text")
+        self.textbox = self.create_textbox('Text', text_tab)
+
+        analyze_tab = tkinter.Frame(self.notebook)
+        self.notebook.add(analyze_tab, text="Analyze")
+        self.nerbox = self.create_textbox('Named Entities', analyze_tab)
+        self.collocationsbox = self.create_textbox('Collocations', analyze_tab)
+        self.spell_errors = self.create_textbox('Spelling Mistakes', analyze_tab)
+        self.lexical_words = self.create_textbox('Lexical Words', analyze_tab)
+
+        features_tab = tkinter.Frame(self.notebook)
+        self.notebook.add(features_tab, text="Features")
+        self.measures = self.create_textbox('Measures', features_tab, height=40)
+
+        self.doc = doc
+        self.load_doc(doc)
+        if bin_calc is not None:
+            feedback_tab = tkinter.Frame(self.notebook)
+            self.notebook.add(feedback_tab, text="Feedback")
+            create_feature_grid(feedback_tab, bin_calc, doc)
+        # self.measures = self.create_textbox('Feedback', feedback_tab)
+
+        self.notebook.pack()
+
+    def create_textbox(self, label='', parent=None, height=10):
+        if parent is None:
+            parent = self
+        label = tkinter.Label(parent, text=label)
+        label.pack()
+        textbox = tkinter.Text(parent, height=height)
+        textbox.pack(fill=tkinter.X)
+        return textbox
+
+    def load_doc(self, doc):
+        self.textbox.insert(tkinter.INSERT, doc.text.strip())
+
+        self.nerbox.insert(tkinter.INSERT, ', '.join([str(t) for t in doc if t.ent_type > 0]))
+        self.collocationsbox.insert(tkinter.INSERT, '\n'.join([str(col) for col in doc._.collocations]))
+        self.spell_errors.insert(tkinter.INSERT, '\n'.join([str(t) for t in doc._.spell_errors]))
+        self.lexical_words.insert(tkinter.INSERT, ', '.join([str(t) for t in doc if t._.is_lexical]))
+
+        self.measures.insert(tkinter.INSERT,
+                             '\n'.join([str(f) + ': ' + str(v) for f, v in doc._.features.items()]))
+
+
+class AddTextView(tkinter.Toplevel):
+
+    def __init__(self, parent):
+        super().__init__()
+
+        self.parent = parent
+        self.textbox = tkinter.Text(self, height=10)
+        self.textbox.pack()
+
+        self.button = tkinter.Button(self, text="OK", command=self.onAdd)
+        self.button.pack()
+
+    def onAdd(self):
+        text = self.textbox.get("1.0",tkinter.END)
+        self.parent.add_essay(text)
+        self.destroy()
+
+def main():
+    root = Tk()
+
+    app = MainFrame()
+
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+import sys
+
+import numpy as np
+from DataReader.XMLReader import get_essays
+from time import time
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+dataset_path = '/home/simon/Downloads/efcamdat/'
+levels = [sys.argv[1]]
+
+essays = []
+scores = []
+
+result = {}
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures_level = {executor.submit(get_essays, dataset_path + 'level_' + level + '.xml'): level for level in levels}
+    for future in as_completed(futures_level):
+        level = futures_level[future]
+        try:
+            level_result = future.result()
+            result[level] = level_result
+        except Exception as exc:
+            print('%r generated an exception: %s' % (level, exc))
+
+    for level in levels:
+        essays += result[level][0]
+        scores += result[level][1]
+scores = np.array(scores)
+print("done")
+print("Number of essays: " + str(len(essays)))
+sys.stdout.flush()
+
+import spacy
+from essay_evaluation.lexical_accuracy import SpellChecker, CollocationPreprocessor, CollocationDectector, \
+    LexicalAccuracy, CollocationEvaluator
+from essay_evaluation.pipeline import FeatureCollector
+from essay_evaluation.collocational_aspects import CollocationalAspects
+
+
+def chunks(l, n):
+    """Yield successive n-sized chunks from l.
+        from Ned Batchelder - https://stackoverflow.com/a/312464
+    """
+    for i in range(0, len(l), n):
+        yield l[i:i + n]
+
+def pipe(id, essay_batch):
+    print('process ' + str(id) + ' start!')
+    sys.stdout.flush()
+    nlp = spacy.load('en_core_web_sm')
+    # we only need the tokenizer from spaCy
+    nlp.remove_pipe('tagger')
+    nlp.remove_pipe('parser')
+    nlp.remove_pipe('ner')
+
+    # add all required components
+    spell_checker = SpellChecker()
+    nlp.add_pipe(spell_checker, name=spell_checker.name, last=True)
+
+    col_preproc = CollocationPreprocessor()
+    nlp.add_pipe(col_preproc, name=col_preproc.name, last=True)
+
+    col_detect = CollocationDectector()
+    nlp.add_pipe(col_detect, name=col_detect.name, last=True)
+
+    col_evaluator = CollocationEvaluator()
+    nlp.add_pipe(col_evaluator, name=col_evaluator.name, last=True)
+
+    # add the lexical accuracy feature extractor
+    la_feature_extractor = LexicalAccuracy()
+    nlp.add_pipe(la_feature_extractor, name=la_feature_extractor.name, last=True)
+
+    # add the collocational aspects feature extractor
+
+    ca_feature_extractor = CollocationalAspects()
+    nlp.add_pipe(ca_feature_extractor, name=ca_feature_extractor.name, last=True)
+
+    # add the feature collector to get a nice feature matrix
+    feature_collector = FeatureCollector()
+    nlp.add_pipe(feature_collector, name=feature_collector.name, last=True)
+
+    feature_names = la_feature_extractor.feature_names + ca_feature_extractor.feature_names
+
+    docs = []
+    start = time()
+    for idx, essay in enumerate(essay_batch):
+        docs.append(nlp(essay))
+        if idx % 10 == 0:
+            print("process " + str(id) + ' - '  + str(idx + 1) + " docs - elapsed time: " + str(time() - start))
+            sys.stdout.flush()
+    # we can't return the documents at this point.
+    # Returning them from one process to another would mean pickling them
+    # this causes an error (token can not be pickeled
+    # https://github.com/allenai/allennlp/issues/1887 (other project with same problem)
+
+    return feature_collector.get_feature_matrix()
+
+
+chucked = chunks(essays, 1000)
+result = {}
+with ProcessPoolExecutor(max_workers=10) as executor:
+    futures = {executor.submit(pipe, idx, batch): idx for idx, batch in enumerate(chucked)}
+    for future in as_completed(futures):
+        idx = futures[future]
+        try:
+            batch_result = future.result()
+            result[idx] = batch_result
+        except Exception as exc:
+            print('%r generated an exception: %s' % (idx, exc))
+
+print("writing to disk")
+sys.stdout.flush()
+
+feature_matrix = []
+
+for idx in range(len(result)):
+    feature_matrix += result[idx]
+nparr = np.array(feature_matrix)
+np.save(sys.argv[2] +'.npy',nparr)

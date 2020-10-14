@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+import argparse
+import math
+import sys
+
+import numpy as np
+from DataReader.XMLReader import get_essays, get_bawe_texts, get_flip_texts
+from time import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from essay_evaluation.lexical_density import LexicalDensityFeatures
+from essay_evaluation.lexical_sophistication import LexicalSophisticationFeatures
+from essay_evaluation.lexical_variation import LexicalVariationFeatures
+
+import spacy
+from essay_evaluation.lexical_accuracy import SpellChecker, CollocationPreprocessor, CollocationDectector, \
+    LexicalAccuracy, CollocationEvaluator
+from essay_evaluation.association_scores import AssociationScores
+from essay_evaluation.pipeline import FeatureCollector
+from essay_evaluation.collocational_aspects import CollocationalAspects
+
+
+
+def chunks(l, n):
+    """Yield successive n-sized chunks from l.
+        from Ned Batchelder - https://stackoverflow.com/a/312464
+    """
+    for i in range(0, len(l), n):
+        yield l[i:i + n]
+
+
+def pipe(id, essay_batch):
+    print('process ' + str(id) + ' start!')
+    sys.stdout.flush()
+    nlp = spacy.load('en_core_web_sm')
+    # we only need the tokenizer from spaCy
+    #nlp.remove_pipe('tagger')
+    #nlp.remove_pipe('parser')
+    #nlp.remove_pipe('ner')
+
+    # add all required components
+    spell_checker = SpellChecker()
+    nlp.add_pipe(spell_checker, name=spell_checker.name, last=True)
+
+    col_preproc = CollocationPreprocessor()
+    nlp.add_pipe(col_preproc, name=col_preproc.name, last=True)
+
+    col_detect = CollocationDectector()
+    nlp.add_pipe(col_detect, name=col_detect.name, last=True)
+
+    col_evaluator = CollocationEvaluator()
+    nlp.add_pipe(col_evaluator, name=col_evaluator.name, last=True)
+
+    # Add all feature extractors:
+    lvf = LexicalVariationFeatures()
+    lsf = LexicalSophisticationFeatures()
+    ldf = LexicalDensityFeatures()
+    la = LexicalAccuracy()
+    ca = CollocationalAspects()
+
+    nlp.add_pipe(lvf, name=lvf.name, last=True)
+    nlp.add_pipe(lsf, name=lsf.name, last=True)
+    nlp.add_pipe(la, name=la.name, last=True)
+    nlp.add_pipe(ca, name=ca.name, last=True)
+    nlp.add_pipe(ldf, name=ldf.name, last=True)
+    # Order: LV, LS, LA, CA, LD
+
+    # add the feature collector to get a nice feature matrix
+    feature_collector = FeatureCollector()
+    nlp.add_pipe(feature_collector, name=feature_collector.name, last=True)
+
+    feature_names = lvf.feature_names + lsf.feature_names + ldf.feature_names + la.feature_names + ca.feature_names
+
+    docs = []
+    start = time()
+    for idx, essay in enumerate(essay_batch):
+        docs.append(nlp(essay))
+        if idx % 100 == 0:
+            print("process " + str(id) + ' - ' + str(idx + 1) + "/" + str(len(essay_batch)) +  " docs - elapsed time: " + str(time() - start))
+            sys.stdout.flush()
+    # we can't return the documents at this point.
+    # Returning them from one process to another would mean pickling them
+    # this causes an error (token can not be pickeled
+    # https://github.com/allenai/allennlp/issues/1887 (other project with same problem)
+
+    return feature_collector.get_feature_matrix()
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="""this program extracts the feature matrices of an efcamdat xml essay file"""
+    )
+    parser.add_argument(
+        "inputfile",
+        help="has to be an efcamdat .xml file or a directory with BAWE txt files"
+    )
+    parser.add_argument(
+        "outputfile",
+        help="""file where the feature matrix shall we written to (usually ends with .npy)"""
+    )
+    parser.add_argument(
+        "-p",
+        "--processes",
+        default=10,
+        type=int,
+        help="number of processes to be used"
+    )
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        default='efcamdat2',
+        choices=['efcamdat2', 'bawe', 'flip'],
+        help="""Dataset type. Has to be one of efcamdat2 (single .xml file), bawe (directory containing txt files) or 
+the FLIP English dataset (single csv file)      
+         """
+    )
+    return parser.parse_args()
+
+def main():
+    args = get_args()
+    print("reading essays")
+    if args.dataset == 'efcamdat2':
+        essays, scores = get_essays(args.inputfile)
+    elif args.dataset == 'bawe':
+        essays = get_bawe_texts(args.inputfile)
+    else:
+        essays = get_flip_texts(args.inputfile)
+
+    print("extracting feature values")
+    num_of_chunks = math.ceil(len(essays) / args.processes)
+
+    chunked = list(chunks(essays, num_of_chunks))
+    result = {}
+    with ProcessPoolExecutor(max_workers=args.processes) as executor:
+        futures = {executor.submit(pipe, idx, batch): idx for idx, batch in enumerate(chunked)}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                batch_result = future.result()
+                if len(batch_result) != len(chunked[idx]):
+                    print("Batch result length of ", len(batch_result), " is not equal to the input size of ", len(chunked[idx]))
+                result[idx] = batch_result
+            except Exception as exc:
+                print('%r generated an exception: %s' % (idx, exc))
+                print("program exit")
+                sys.exit(1)
+
+    print("writing to disk")
+    sys.stdout.flush()
+
+    feature_matrix = []
+
+    for idx in range(len(result)):
+        feature_matrix += result[idx]
+    nparr = np.array(feature_matrix)
+    np.save(args.outputfile, nparr)
+
+
+
+
+if __name__ == '__main__':
+    main()

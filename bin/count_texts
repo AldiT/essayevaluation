@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+import argparse
+import html
+import operator
+from collections import Counter
+
+import spacy
+from bs4 import BeautifulSoup
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "input",
+        help="input file (an efcamdat xml file)"
+    )
+    parser.add_argument(
+        "output_lexical_tokens",
+        help="Output containing lexical token frequencies (csv format)"
+    )
+    parser.add_argument(
+        "output_strict_lexical_tokens",
+        help="Output containing strict lexical token frequencies (csv format)"
+    )
+    return parser.parse_args()
+
+def get_lexical_tokens(doc):
+    lexical, lexical_strict = [], []
+    for token in doc:
+        if token.pos_ == "NOUN" or token.pos_ == "VERB" or token.pos_ == "ADJ" or token.pos_ == "ADV":
+            lexical.append(str(token))
+
+            if token.tag_ != 'NNP' and token.tag_ != 'NNPS' and token.tag_ != "MD":
+                lexical_strict.append(str(token))
+
+    return lexical, lexical_strict
+
+
+def write_csv(fh, counter):
+    freq_list = list(counter.items())
+    freq_list.sort(key = operator.itemgetter(0))
+    for num_tokens, freqs in freq_list:
+        fh.write(str(num_tokens) + ',' + str(freqs) + '\n')
+
+
+def main():
+    args = get_args()
+    c_lex_tokens = Counter()
+    c_lex_strict_tokens = Counter()
+
+    nlp = spacy.load('en_core_web_sm')
+    nlp.remove_pipe('parser')
+    nlp.remove_pipe('ner')
+
+    with open(args.input, 'r') as fh:
+        soup = BeautifulSoup(fh, "lxml")
+        writings = soup.find_all("writing")
+        n = len(writings)
+        for i, writing in enumerate(writings):
+            text = html.unescape(writing.find('text').text)
+            doc = nlp(text)
+            lexical_tokens, strict_lexical_tokens = get_lexical_tokens(doc)
+
+            c_lex_tokens.update([len(lexical_tokens)])
+            c_lex_strict_tokens.update([len(strict_lexical_tokens)])
+            if (i+1)%100 == 0:
+                print(i+1, '/', n, end='\r')
+        print()
+
+    with open(args.output_lexical_tokens, 'w') as fh:
+        write_csv(fh, c_lex_tokens)
+
+    with open(args.output_strict_lexical_tokens, 'w') as fh:
+        write_csv(fh, c_lex_strict_tokens)
+
+if __name__ == "__main__":
+    main()

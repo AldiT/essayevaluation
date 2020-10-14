@@ -1,0 +1,29 @@
+numpy
+beautifulsoup4
+lxml
+spacy
+
+
+# following dependencies are required for the text_readability features
+lexicalrichness
+nltk
+textblob
+
+# library which provides the feature indices from TAALED
+lexical-diversity
+
+# following are required for the lexical sophistication
+pandas
+pyphen
+
+# following dependencies are required for the lexical accuracy features
+hunspell # spell checker
+
+# neo4j GraphDatabase
+neo4j
+
+# classification
+sklearn
+
+# coreference parsing
+neuralcoref

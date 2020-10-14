@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+import argparse
+import html
+import random
+
+"""
+changelog from v2:
+- uses less memory (-> no 30,000 essay limitation)
+- filter for lexical words
+- shuffle argument
+"""
+try:
+    from bs4 import BeautifulSoup as BS
+    import spacy
+    import numpy as np
+except ImportError as err:
+    print('Dependencies misssing. Please install the ' + str(err.name) + ' module')
+    exit()
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="""This tool offers to filter the EFCAMDAT dataset's essays \
+                       based on specified conditions."""
+    )
+    parser.add_argument(
+        "input_files",
+        nargs='+',
+        help="List of EFCAMDATv2 files"
+    )
+    parser.add_argument(
+        "output_file",
+        help="output file"
+    )
+    parser.add_argument(
+        "--min-tokens",
+        default=50,
+        type=int,
+        help="Requires the text to have at least n tokens."
+    )
+    parser.add_argument(
+        "--max-tokens",
+        default=200,
+        type=int,
+        help="Requires the text to have at most n tokens."
+    )
+    parser.add_argument(
+        "--min-lexical",
+        type=int,
+        help="Requires the text to have at least n lexical tokens."
+    )
+    parser.add_argument(
+        "--max-lexical",
+        type=int,
+        help="Requires the text to have at most n lexical tokens."
+    )
+    parser.add_argument(
+        "-s",
+        "--shuffle",
+        action="store_true",
+        help="Shuffles the filtered essays"
+    )
+    parser.add_argument(
+        "-n",
+        "--text-number",
+        type=int,
+        help="Only output the first n filtered essays"
+    )
+    parser.add_argument(
+        "-p",
+        "--progress",
+        action="store_true",
+        help="Output progress messages"
+    )
+
+    return parser.parse_args()
+
+
+def get_args_as_str(args):
+    names = ['min_tokens', 'max_tokens','min_lexical', 'max_lexical', 'shuffle', 'text_number']
+    args = vars(args)
+    return '\n'.join(['\t<' + n + '>' + str(args[n]) + '</' + n + '>' for n in names if args[n] is not None])
+
+class MultipleFileIterator:
+
+    def __init__(self, input_files):
+        fh_lst = []
+        for file in input_files:
+            fh_lst.append(open(file))
+        self.fh_iterator = fh_lst.__iter__()
+        self.essay_iterator = None
+
+    def update_essay_iterator(self):
+        fh = self.fh_iterator.__next__()
+        soup = BS(fh, "lxml")
+        writings = soup.find_all("writing")
+        self.essay_iterator = writings.__iter__()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.essay_iterator is None:
+            self.update_essay_iterator()
+
+        try:
+            return self.__get_essay(self.essay_iterator.__next__())
+        except StopIteration:
+            self.update_essay_iterator()
+            return self.__get_essay(self.essay_iterator.__next__())
+
+    @staticmethod
+    def __get_essay(writing):
+        textxml = writing.find("text")
+        return html.unescape(textxml.text), int(writing.find('grade').text), writing
+
+
+class ConditionCheck:
+
+    def __init__(self, args):
+        self.nlp = spacy.load('en_core_web_sm')
+        self.nlp.remove_pipe('parser')
+        self.nlp.remove_pipe('ner')
+
+        self.args = args
+
+    def fulfills_condition(self, text, grade, xml):
+        doc = self.nlp(text)
+        lexical_tokens = self.__get_lexical_tokens(doc)
+
+        if self.args.min_tokens is not None and len(doc) < self.args.min_tokens:
+            return False
+
+        if self.args.max_tokens is not None and len(doc) > self.args.max_tokens:
+            return False
+
+        if self.args.min_lexical is not None and len(lexical_tokens) < self.args.min_lexical:
+            return False
+
+        if self.args.max_lexical is not None and len(lexical_tokens) > self.args.max_lexical:
+            return False
+
+        return True
+
+    @staticmethod
+    def __get_lexical_tokens(doc):
+        return [str(token) for token in doc if
+                (token.pos_ == "NOUN" and token.tag_ != 'NNP' and token.tag_ != 'NNPS') or
+                (token.pos_ == "VERB" and token.tag_ != 'MD') or
+                token.pos_ == "ADJ" or token.pos_ == "ADV"]
+
+
+class Printer:
+
+    def __init__(self, args):
+        self.quiet = not args.progress
+
+    def msg(self, msg):
+        if not self.quiet:
+            print(msg)
+
+    def progress(self, msg, i, n):
+        if (i+1)%200 == 0 and not self.quiet:
+            print(msg, ' (', i, '/', n, ')')
+
+
+
+def main():
+    args = get_args()
+
+    condition_check = ConditionCheck(args)
+    printer = Printer(args)
+
+    with open(args.output_file, 'w') as output_fh:
+        output_fh.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        output_fh.write('<selection id="filtered_selection">\n')
+        output_fh.write('<meta name="inputfiles">' + ','.join(args.input_files) + '</meta>\n')
+        output_fh.write('<arguments>\n')
+        output_fh.write(get_args_as_str(args))
+        output_fh.write('</arguments>\n')
+        output_fh.write('<writings>\n')
+        essay_iterator = MultipleFileIterator(args.input_files)
+
+        n = '?'
+        if args.shuffle:
+            printer.msg('reading input files')
+            essay_iterator = list(essay_iterator)
+            printer.msg('shuffling input files')
+            random.shuffle(essay_iterator)
+            n = len(essay_iterator)
+            if args.text_number is not None:
+                n = min(args.text_number, len(essay_iterator))
+
+        i = 0
+        for text, grade, xml in essay_iterator:
+            if args.text_number is not None and i >= args.text_number:
+                break
+            printer.progress('writing to outputfile', i, n)
+            if condition_check.fulfills_condition(text, grade, xml):
+                output_fh.write(str(xml) + '\n')
+                i += 1
+
+        output_fh.write('</writings>\n')
+        output_fh.write('</selection>')
+
+        printer.msg('done, wrote ' + str(i) + ' texts')
+
+
+if __name__ == "__main__":
+    main()
