@@ -33,6 +33,6 @@ tba
 #### v0.0.3
 - The spell checker only marks words as spelling mistakes if they can not be found in the en_GB and en_US dictionary. 
 
-### In equal collaboration with [Simon Klimek](go@simkli.de)
+### In equal collaboration with [Simon Klimek](mailto:go@simkli.de)
 
 ### [Documentation](https://home.in.tum.de/~klimek/essayevaluation/)
