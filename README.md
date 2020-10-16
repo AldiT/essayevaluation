@@ -32,3 +32,5 @@ tba
 
 #### v0.0.3
 - The spell checker only marks words as spelling mistakes if they can not be found in the en_GB and en_US dictionary. 
+
+### [Documentation](https://home.in.tum.de/~klimek/essayevaluation/)
